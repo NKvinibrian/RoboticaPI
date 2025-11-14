@@ -21,7 +21,17 @@ const uint8_t PIN_S_CENTER = A4;
 const uint8_t PIN_S_RIGHT  = A5;
 
 // Threshold analógico (0..1023). Ativa acima de 500
-const int SENSOR_THRESHOLD = 500;
+const int SENSOR_THRESHOLD = 200;
+
+// ----------------------------- Ultrassom ----------------------------
+// HC-SR04: TRIG -> saída, ECHO -> entrada
+// Escolhidos pinos livres no Uno: A0 (TRIG), A1 (ECHO)
+const uint8_t PIN_US_TRIG = A0;
+const uint8_t PIN_US_ECHO = A1;
+// Distância (cm) para parar o robô quando houver obstáculo à frente
+const uint16_t ULTRASONIC_ALERT_CM = 15;   // ajuste conforme necessário
+// Timeout do pulseIn em microssegundos (≈ 20 ms ~ 3.4 m máx.)
+const unsigned long ULTRASONIC_TIMEOUT_US = 20000UL;
 
 // ----------------------------- Motores -----------------------------
 // LEFT motor (ULN2003 IN1..IN4)
@@ -105,6 +115,28 @@ void turnRightPivot() {
   stepBoth(+1, -1, TURN_STEPS_PER_LOOP, STEP_DELAY_US_TURN);
 }
 
+// Desenergiza as bobinas para parar o robô
+void stopMotors() {
+  digitalWrite(L_IN1, LOW); digitalWrite(L_IN2, LOW);
+  digitalWrite(L_IN3, LOW); digitalWrite(L_IN4, LOW);
+  digitalWrite(R_IN1, LOW); digitalWrite(R_IN2, LOW);
+  digitalWrite(R_IN3, LOW); digitalWrite(R_IN4, LOW);
+}
+
+// Medição simples do HC-SR04 (bloqueante porém rápida)
+unsigned int measureDistanceCm() {
+  digitalWrite(PIN_US_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(PIN_US_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(PIN_US_TRIG, LOW);
+
+  unsigned long dur = pulseIn(PIN_US_ECHO, HIGH, ULTRASONIC_TIMEOUT_US);
+  if (dur == 0) return 0; // sem eco dentro do timeout -> fora de alcance
+  // Fórmula aproximada: cm = dur / 58
+  return (unsigned int)(dur / 58UL);
+}
+
 // ----------------------------- Setup/Loop ---------------------------
 enum Mode : uint8_t { MODE_STRAIGHT, MODE_LEFT, MODE_RIGHT, MODE_IDLE };
 Mode lastMode = MODE_STRAIGHT;
@@ -114,6 +146,11 @@ void setup() {
   pinMode(PIN_S_LEFT,   INPUT);
   pinMode(PIN_S_CENTER, INPUT);
   pinMode(PIN_S_RIGHT,  INPUT);
+
+  // Ultrassom
+  pinMode(PIN_US_TRIG, OUTPUT);
+  pinMode(PIN_US_ECHO, INPUT);
+  digitalWrite(PIN_US_TRIG, LOW);
 
   for (uint8_t p : motorLeft.pins)  pinMode(p, OUTPUT);
   for (uint8_t p : motorRight.pins) pinMode(p, OUTPUT);
@@ -129,6 +166,7 @@ void setup() {
   delay(300);
   Serial.println(F("Seguidor de linha - 28BYJ-48 + ULN2003"));
   Serial.print(F("THRESHOLD=")); Serial.println(SENSOR_THRESHOLD);
+  Serial.print(F("ULTRASONIC_ALERT_CM=")); Serial.println(ULTRASONIC_ALERT_CM);
 #endif
 }
 
@@ -143,26 +181,47 @@ void loop() {
   bool C = adcC > SENSOR_THRESHOLD;
   bool R = adcR > SENSOR_THRESHOLD;
 
+  // Leitura ultrassônica (amostragem periódica para evitar bloqueio longo)
+  static uint32_t lastUSms = 0;
+  static unsigned int distCm = 0;
+  uint32_t now = millis();
+  if (now - lastUSms >= 60) { // ~16 Hz
+    distCm = measureDistanceCm();
+    lastUSms = now;
+    // print removido para consolidar em uma única linha de debug
+  }
+
+  // Histerese simples para estado de obstáculo
+  static bool obstacle = false;
+  if (distCm > 0) {
+    if (!obstacle && distCm <= ULTRASONIC_ALERT_CM) obstacle = true;
+    else if (obstacle && distCm > (ULTRASONIC_ALERT_CM + 3)) obstacle = false;
+  }
+
   Mode mode;
 
-  // Prioridade: se centro vê linha, siga reto; senão ajuste para o lado que vê.
-  if (C) {
-    mode = MODE_STRAIGHT;
-  } else if (L && !R) {
-    mode = MODE_LEFT;
-  } else if (R && !L) {
-    mode = MODE_RIGHT;
-  } else if (L && R) {
-    // Linha larga / cruzamento: tente seguir reto
-    mode = MODE_STRAIGHT;
+  // Se houver obstáculo à frente, para o robô
+  if (obstacle) {
+    mode = MODE_IDLE;
   } else {
-    // Nada detectado: seguir reto (pedido do usuário)
-    mode = MODE_STRAIGHT;
+    // Prioridade: se centro vê linha, siga reto; senão ajuste para o lado que vê.
+    if (C) {
+      mode = MODE_STRAIGHT;
+    } else if (L && !R) {
+      mode = MODE_LEFT;
+    } else if (R && !L) {
+      mode = MODE_RIGHT;
+    } else if (L && R) {
+      // Linha larga / cruzamento: tente seguir reto
+      mode = MODE_STRAIGHT;
+    } else {
+      // Nada detectado: seguir reto (pedido do usuário)
+      mode = MODE_STRAIGHT;
+    }
   }
 
 #if DEBUG
   static uint32_t t0 = 0;
-  uint32_t now = millis();
   if (now - t0 > 100) {
     t0 = now;
     Serial.print(F("adc L=")); Serial.print(adcL);
@@ -171,6 +230,8 @@ void loop() {
     Serial.print(F(" | act L=")); Serial.print(L);
     Serial.print(F(" C=")); Serial.print(C);
     Serial.print(F(" R=")); Serial.print(R);
+    Serial.print(F(" | DIST=")); Serial.print(distCm); Serial.print(F(" cm"));
+    Serial.print(F(" obst=")); Serial.print(obstacle);
     Serial.print(F(" | mode="));
     if (mode == MODE_STRAIGHT) Serial.println(F("STRAIGHT"));
     else if (mode == MODE_LEFT) Serial.println(F("LEFT"));
@@ -184,6 +245,7 @@ void loop() {
     case MODE_STRAIGHT: goStraight(); break;
     case MODE_LEFT:     turnLeftPivot(); break;
     case MODE_RIGHT:    turnRightPivot(); break;
+    case MODE_IDLE:     stopMotors(); break;
     default:            goStraight(); break; // opção segura: avance devagar
   }
 
