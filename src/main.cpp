@@ -21,7 +21,7 @@ const uint8_t PIN_S_CENTER = A4;
 const uint8_t PIN_S_RIGHT  = A5;
 
 // Threshold analógico (0..1023). Ativa acima de 500
-const int SENSOR_THRESHOLD = 500;
+const int SENSOR_THRESHOLD = 200;
 
 // ----------------------------- Motores -----------------------------
 // LEFT motor (ULN2003 IN1..IN4)
@@ -40,10 +40,13 @@ const uint8_t R_IN4 = 12;
 // Para 28BYJ-48, valores típicos 800–2000 us. Comece com 1200.
 const unsigned int STEP_DELAY_US_STRAIGHT = 1200;
 const unsigned int STEP_DELAY_US_TURN     = 1000;  // um pouco mais rápido nos giros
+// Curva suave (menos agressiva que pivô)
+const unsigned int STEP_DELAY_US_GENTLE   = 1200;
 
 // Quantidade de meia-etapas por iteração (pode refinar o "ganho" da curva)
 const uint8_t STRAIGHT_STEPS_PER_LOOP = 1;
 const uint8_t TURN_STEPS_PER_LOOP     = 2;
+const uint8_t GENTLE_STEPS_PER_LOOP   = 1;
 
 // ---------------------- Sequência meia-etapa ------------------------
 const uint8_t HALFSTEP_SEQ[8][4] = {
@@ -105,8 +108,18 @@ void turnRightPivot() {
   stepBoth(+1, -1, TURN_STEPS_PER_LOOP, STEP_DELAY_US_TURN);
 }
 
+void turnLeftGentle() {
+  // Curva suave: pivô mais lento (menos passos)
+  stepBoth(-1, +1, GENTLE_STEPS_PER_LOOP, STEP_DELAY_US_GENTLE);
+}
+
+void turnRightGentle() {
+  // Curva suave: pivô mais lento (menos passos)
+  stepBoth(+1, -1, GENTLE_STEPS_PER_LOOP, STEP_DELAY_US_GENTLE);
+}
+
 // ----------------------------- Setup/Loop ---------------------------
-enum Mode : uint8_t { MODE_STRAIGHT, MODE_LEFT, MODE_RIGHT, MODE_IDLE };
+enum Mode : uint8_t { MODE_STRAIGHT, MODE_LEFT, MODE_RIGHT, MODE_LEFT_GENTLE, MODE_RIGHT_GENTLE, MODE_IDLE };
 Mode lastMode = MODE_STRAIGHT;
 
 void setup() {
@@ -145,8 +158,15 @@ void loop() {
 
   Mode mode;
 
-  // Prioridade: se centro vê linha, siga reto; senão ajuste para o lado que vê.
-  if (C) {
+  // Nova regra: se centro + lado ativo -> curva suave para o lado correspondente
+  if (C && L && !R) {
+    mode = MODE_LEFT_GENTLE;
+  } else if (C && R && !L) {
+    mode = MODE_RIGHT_GENTLE;
+  } else if (C && L && R) {
+    // Centro e ambos os lados: trate como reto para estabilizar
+    mode = MODE_STRAIGHT;
+  } else if (C) {
     mode = MODE_STRAIGHT;
   } else if (L && !R) {
     mode = MODE_LEFT;
@@ -156,7 +176,7 @@ void loop() {
     // Linha larga / cruzamento: tente seguir reto
     mode = MODE_STRAIGHT;
   } else {
-    // Nada detectado: seguir reto (pedido do usuário)
+    // Nada detectado: seguir reto
     mode = MODE_STRAIGHT;
   }
 
@@ -175,16 +195,20 @@ void loop() {
     if (mode == MODE_STRAIGHT) Serial.println(F("STRAIGHT"));
     else if (mode == MODE_LEFT) Serial.println(F("LEFT"));
     else if (mode == MODE_RIGHT) Serial.println(F("RIGHT"));
+    else if (mode == MODE_LEFT_GENTLE) Serial.println(F("LEFT_GENTLE"));
+    else if (mode == MODE_RIGHT_GENTLE) Serial.println(F("RIGHT_GENTLE"));
     else Serial.println(F("IDLE"));
   }
 #endif
 
   // Executa movimento curto (não bloqueia por muito tempo) e reavalia
   switch (mode) {
-    case MODE_STRAIGHT: goStraight(); break;
-    case MODE_LEFT:     turnLeftPivot(); break;
-    case MODE_RIGHT:    turnRightPivot(); break;
-    default:            goStraight(); break; // opção segura: avance devagar
+    case MODE_STRAIGHT:      goStraight(); break;
+    case MODE_LEFT:          turnLeftPivot(); break;
+    case MODE_RIGHT:         turnRightPivot(); break;
+    case MODE_LEFT_GENTLE:   turnLeftGentle(); break;
+    case MODE_RIGHT_GENTLE:  turnRightGentle(); break;
+    default:                 goStraight(); break; // opção segura: avance devagar
   }
 
   lastMode = mode;

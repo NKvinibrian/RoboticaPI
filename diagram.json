@@ -2,6 +2,23 @@
     "version": 1,
     "author": "Vinicius",
     "editor": "wokwi",
-    "parts": [ { "type": "wokwi-arduino-uno", "id": "uno", "top": 0, "left": 0, "attrs": {} } ],
-    "connections": []
+    "parts": [
+        { "type": "wokwi-arduino-uno", "id": "uno", "top": 0, "left": 0, "attrs": {} },
+        { "type": "wokwi-potentiometer", "id": "potL", "top": 180, "left": -40, "attrs": {"value": 0.5} },
+        { "type": "wokwi-potentiometer", "id": "potC", "top": 180, "left": 60,  "attrs": {"value": 0.5} },
+        { "type": "wokwi-potentiometer", "id": "potR", "top": 180, "left": 160, "attrs": {"value": 0.5} }
+    ],
+    "connections": [
+        ["uno:5V", "potL:VCC", "red", ["v0"]],
+        ["uno:GND", "potL:GND", "black", ["v0"]],
+        ["potL:SIG", "uno:A3", "green", ["v0"]],
+
+        ["uno:5V", "potC:VCC", "red", ["v0"]],
+        ["uno:GND", "potC:GND", "black", ["v0"]],
+        ["potC:SIG", "uno:A4", "green", ["v0"]],
+
+        ["uno:5V", "potR:VCC", "red", ["v0"]],
+        ["uno:GND", "potR:GND", "black", ["v0"]],
+        ["potR:SIG", "uno:A5", "green", ["v0"]]
+    ]
 }
