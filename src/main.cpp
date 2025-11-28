@@ -15,13 +15,17 @@
 
 #define DEBUG 1  // 1 para imprimir leituras no Serial
 
+// ----------------------------- LED onboard (heartbeat) -----------------------------
+const uint8_t PIN_LED = LED_BUILTIN; // LED interno da placa
+const unsigned long LED_BLINK_MS = 500; // ms entre piscadas
+
 // ----------------------------- Sensores -----------------------------
 const uint8_t PIN_S_LEFT   = A3;
 const uint8_t PIN_S_CENTER = A4;
 const uint8_t PIN_S_RIGHT  = A5;
 
-// Threshold analógico (0..1023). Ativa acima de 500
-const int SENSOR_THRESHOLD = 200;
+// Threshold analógico (0..1023). Ativa acima de 200
+const int SENSOR_THRESHOLD = 120;
 
 // ----------------------------- Ultrassom ----------------------------
 // HC-SR04: TRIG -> saída, ECHO -> entrada
@@ -33,94 +37,78 @@ const uint16_t ULTRASONIC_ALERT_CM = 15;   // ajuste conforme necessário
 // Timeout do pulseIn em microssegundos (≈ 20 ms ~ 3.4 m máx.)
 const unsigned long ULTRASONIC_TIMEOUT_US = 20000UL;
 
-// ----------------------------- Motores -----------------------------
-// LEFT motor (ULN2003 IN1..IN4)
-const uint8_t L_IN1 = 8;
-const uint8_t L_IN2 = 9;
-const uint8_t L_IN3 = 10;
-const uint8_t L_IN4 = 11;
+// ----------------------------- Motores (HW-095 H-bridge) -----------------------------
+// HW-095 uses 4 inputs: IN1, IN2 control Motor A; IN3, IN4 control Motor B
+// O usuário conectou IN1..IN4 aos pinos 8,9,10,11 respectivamente.
+// Mapeamento: LEFT motor = Motor A (IN1, IN2 -> 8,9)
+//             RIGHT motor = Motor B (IN3, IN4 -> 10,11)
+const uint8_t M_LEFT_IN1  = 8;  // IN1
+const uint8_t M_LEFT_IN2  = 9;  // IN2
+const uint8_t M_RIGHT_IN1 = 10; // IN3
+const uint8_t M_RIGHT_IN2 = 11; // IN4
+const uint8_t M_LEFT_EN   = 5;  // ENA (D5)
+const uint8_t M_RIGHT_EN  = 6;  // ENB (D6)
 
-// RIGHT motor (ULN2003 IN1..IN4)
-const uint8_t R_IN1 = 5;
-const uint8_t R_IN2 = 6;
-const uint8_t R_IN3 = 7;
-const uint8_t R_IN4 = 12;
+// Duração do pulso para o movimento em ms. Mantemos curtos para reavaliação rapida.
+// Aumentados para teste de torque: pulsos mais longos permitem o motor atingir velocidade/torque maiores.
+const unsigned int MOVE_PULSE_MS_STRAIGHT = 30; // anteriormente 30
+const unsigned int MOVE_PULSE_MS_TURN     = 45; // anteriormente 45
 
-// Tempo entre meia-etapas (quanto menor, mais rápido).
-// Para 28BYJ-48, valores típicos 800–2000 us. Comece com 1200.
-const unsigned int STEP_DELAY_US_STRAIGHT = 1200;
-const unsigned int STEP_DELAY_US_TURN     = 1000;  // um pouco mais rápido nos giros
+// Motor power (0..255). Ajuste aqui para reduzir/ aumentar velocidade.
+const uint8_t MOTOR_POWER = 180; // reduzido de 100 para deixar o robô mais lento
 
-// Quantidade de meia-etapas por iteração (pode refinar o "ganho" da curva)
-const uint8_t STRAIGHT_STEPS_PER_LOOP = 1;
-const uint8_t TURN_STEPS_PER_LOOP     = 2;
+// Direções: +1 frente, -1 tras, 0 para parado
 
-// ---------------------- Sequência meia-etapa ------------------------
-const uint8_t HALFSTEP_SEQ[8][4] = {
-  {1,0,0,0},
-  {1,1,0,0},
-  {0,1,0,0},
-  {0,1,1,0},
-  {0,0,1,0},
-  {0,0,1,1},
-  {0,0,0,1},
-  {1,0,0,1}
-};
-
-struct Stepper28BYJ {
-  uint8_t pins[4];
-  int8_t  idx;        // 0..7
-  bool    invert;     // inverte o sentido lógico do motor
-};
-
-// Monte aqui conforme sua fiação
-// Invertido globalmente para que goStraight() avance para frente
-Stepper28BYJ motorLeft  = { {L_IN1, L_IN2, L_IN3, L_IN4}, 0, true };
-Stepper28BYJ motorRight = { {R_IN1, R_IN2, R_IN3, R_IN4}, 0, false };
-
-// ----------------------------- Funções ------------------------------
-void writeCoils(const Stepper28BYJ& m, const uint8_t pat[4]) {
-  digitalWrite(m.pins[0], pat[0]);
-  digitalWrite(m.pins[1], pat[1]);
-  digitalWrite(m.pins[2], pat[2]);
-  digitalWrite(m.pins[3], pat[3]);
-}
-
-void stepOnce(Stepper28BYJ &m, int dir /* +1 fwd, -1 bwd */) {
-  int realDir = m.invert ? -dir : dir;
-  m.idx = (m.idx + (realDir > 0 ? 1 : -1) + 8) % 8;
-  writeCoils(m, HALFSTEP_SEQ[m.idx]);
-}
-
-void stepBoth(int dirLeft, int dirRight, uint8_t steps, unsigned int delayUs) {
-  for (uint8_t i = 0; i < steps; i++) {
-    if (dirLeft  != 0) stepOnce(motorLeft,  dirLeft);
-    if (dirRight != 0) stepOnce(motorRight, dirRight);
-    delayMicroseconds(delayUs);
+// Funções de controle simples para motores DC via H-bridge
+void setLeft(int dir) {
+  if (dir > 0) {
+    digitalWrite(M_LEFT_IN1, HIGH);
+    digitalWrite(M_LEFT_IN2, LOW);
+  } else if (dir < 0) {
+    digitalWrite(M_LEFT_IN1, LOW);
+    digitalWrite(M_LEFT_IN2, HIGH);
+  } else {
+    digitalWrite(M_LEFT_IN1, LOW);
+    digitalWrite(M_LEFT_IN2, LOW);
   }
 }
 
-// Movimentos de alto nível
+void setRight(int dir) {
+  if (dir > 0) {
+    digitalWrite(M_RIGHT_IN1, HIGH);
+    digitalWrite(M_RIGHT_IN2, LOW);
+  } else if (dir < 0) {
+    digitalWrite(M_RIGHT_IN1, LOW);
+    digitalWrite(M_RIGHT_IN2, HIGH);
+  } else {
+    digitalWrite(M_RIGHT_IN1, LOW);
+    digitalWrite(M_RIGHT_IN2, LOW);
+  }
+}
+
+// Movimentos de alto nível: agora setam a direção e deixam os motores ligados até que outra ação mude isso.
+// Removemos os delays e stop para manter os motores acionados continuamente enquanto o modo permanecer.
 void goStraight() {
-  stepBoth(+1, +1, STRAIGHT_STEPS_PER_LOOP, STEP_DELAY_US_STRAIGHT);
+  setLeft(+1);
+  setRight(+1);
 }
 
 void turnLeftPivot() {
   // Pivô: esquerda para trás, direita para frente
-  stepBoth(-1, +1, TURN_STEPS_PER_LOOP, STEP_DELAY_US_TURN);
+  setLeft(-1);
+  setRight(+1);
 }
 
 void turnRightPivot() {
   // Pivô: esquerda para frente, direita para trás
-  stepBoth(+1, -1, TURN_STEPS_PER_LOOP, STEP_DELAY_US_TURN);
+  setLeft(+1);
+  setRight(-1);
 }
 
-// Desenergiza as bobinas para parar o robô
+// Desenergiza as bobinas/saídas para parar o robô
 void stopMotors() {
-  digitalWrite(L_IN1, LOW); digitalWrite(L_IN2, LOW);
-  digitalWrite(L_IN3, LOW); digitalWrite(L_IN4, LOW);
-  digitalWrite(R_IN1, LOW); digitalWrite(R_IN2, LOW);
-  digitalWrite(R_IN3, LOW); digitalWrite(R_IN4, LOW);
+  digitalWrite(M_LEFT_IN1, LOW);  digitalWrite(M_LEFT_IN2, LOW);
+  digitalWrite(M_RIGHT_IN1, LOW); digitalWrite(M_RIGHT_IN2, LOW);
 }
 
 // Medição simples do HC-SR04 (bloqueante porém rápida)
@@ -152,21 +140,32 @@ void setup() {
   pinMode(PIN_US_ECHO, INPUT);
   digitalWrite(PIN_US_TRIG, LOW);
 
-  for (uint8_t p : motorLeft.pins)  pinMode(p, OUTPUT);
-  for (uint8_t p : motorRight.pins) pinMode(p, OUTPUT);
+  // Motores (H-bridge)
+  pinMode(M_LEFT_IN1, OUTPUT);
+  pinMode(M_LEFT_IN2, OUTPUT);
+  pinMode(M_RIGHT_IN1, OUTPUT);
+  pinMode(M_RIGHT_IN2, OUTPUT);
+  // EN pins (mantém habilitados permanentemente)
+  pinMode(M_LEFT_EN, OUTPUT);
+  pinMode(M_RIGHT_EN, OUTPUT);
+  // Use PWM on EN pins so podemos controlar potência por software.
+  // Se quiser habilitar sempre na máxima potência, analogWrite com 255 equivale a HIGH.
+  analogWrite(M_LEFT_EN, MOTOR_POWER);
+  analogWrite(M_RIGHT_EN, MOTOR_POWER);
 
-  // Inicializa bobinas desligadas (opcional manter torque: comente as linhas abaixo)
-  digitalWrite(L_IN1, LOW); digitalWrite(L_IN2, LOW);
-  digitalWrite(L_IN3, LOW); digitalWrite(L_IN4, LOW);
-  digitalWrite(R_IN1, LOW); digitalWrite(R_IN2, LOW);
-  digitalWrite(R_IN3, LOW); digitalWrite(R_IN4, LOW);
+  // Inicializa saídas desligadas
+  stopMotors();
 
+  // LED onboard
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, LOW);
+
+  // Serial: inicializa somente se DEBUG ativo (evita overhead quando não necessário)
 #if DEBUG
   Serial.begin(115200);
-  delay(300);
-  Serial.println(F("Seguidor de linha - 28BYJ-48 + ULN2003"));
-  Serial.print(F("THRESHOLD=")); Serial.println(SENSOR_THRESHOLD);
-  Serial.print(F("ULTRASONIC_ALERT_CM=")); Serial.println(ULTRASONIC_ALERT_CM);
+  // Aguarda um breve momento para o monitor Serial se conectar (útil ao usar USB)
+  delay(50);
+  Serial.println(F("[BOOT] Sistema inicializado"));
 #endif
 }
 
@@ -185,6 +184,16 @@ void loop() {
   static uint32_t lastUSms = 0;
   static unsigned int distCm = 0;
   uint32_t now = millis();
+
+  // LED heartbeat (não bloqueante)
+  static uint32_t lastLedMs = 0;
+  static bool ledState = false;
+  if (now - lastLedMs >= LED_BLINK_MS) {
+    ledState = !ledState;
+    digitalWrite(PIN_LED, ledState ? HIGH : LOW);
+    lastLedMs = now;
+  }
+
   if (now - lastUSms >= 60) { // ~16 Hz
     distCm = measureDistanceCm();
     lastUSms = now;
@@ -208,9 +217,11 @@ void loop() {
     if (C) {
       mode = MODE_STRAIGHT;
     } else if (L && !R) {
-      mode = MODE_LEFT;
-    } else if (R && !L) {
+      // inverter direções: sensor ESQUERDO agora força correção que antes era associada a MODE_RIGHT
       mode = MODE_RIGHT;
+    } else if (R && !L) {
+      // inverter direções: sensor DIREITO agora força correção que antes era associada a MODE_LEFT
+      mode = MODE_LEFT;
     } else if (L && R) {
       // Linha larga / cruzamento: tente seguir reto
       mode = MODE_STRAIGHT;
