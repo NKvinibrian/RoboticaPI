@@ -33,7 +33,7 @@ const int SENSOR_THRESHOLD = 120;
 const uint8_t PIN_US_TRIG = A0;
 const uint8_t PIN_US_ECHO = A1;
 // Distância (cm) para parar o robô quando houver obstáculo à frente
-const uint16_t ULTRASONIC_ALERT_CM = 15;   // ajuste conforme necessário
+const uint16_t ULTRASONIC_ALERT_CM = 50;   // desvio de obstáculo quando menor que 25 cm
 // Timeout do pulseIn em microssegundos (≈ 20 ms ~ 3.4 m máx.)
 const unsigned long ULTRASONIC_TIMEOUT_US = 20000UL;
 
@@ -55,7 +55,7 @@ const unsigned int MOVE_PULSE_MS_STRAIGHT = 30; // anteriormente 30
 const unsigned int MOVE_PULSE_MS_TURN     = 45; // anteriormente 45
 
 // Motor power (0..255). Ajuste aqui para reduzir/ aumentar velocidade.
-const uint8_t MOTOR_POWER = 180; // reduzido de 100 para deixar o robô mais lento
+const uint8_t MOTOR_POWER = 160; // 180 Valor bom para não ultrapassar a linha muito rápido,
 
 // Direções: +1 frente, -1 tras, 0 para parado
 
@@ -120,7 +120,7 @@ unsigned int measureDistanceCm() {
   digitalWrite(PIN_US_TRIG, LOW);
 
   unsigned long dur = pulseIn(PIN_US_ECHO, HIGH, ULTRASONIC_TIMEOUT_US);
-  if (dur == 0) return 0; // sem eco dentro do timeout -> fora de alcance
+  if (dur == 0) return 0; // sem eco dentro do timeout -> fora de alcance OU muito perto / mau alinhado
   // Fórmula aproximada: cm = dur / 58
   return (unsigned int)(dur / 58UL);
 }
@@ -128,6 +128,26 @@ unsigned int measureDistanceCm() {
 // ----------------------------- Setup/Loop ---------------------------
 enum Mode : uint8_t { MODE_STRAIGHT, MODE_LEFT, MODE_RIGHT, MODE_IDLE };
 Mode lastMode = MODE_STRAIGHT;
+
+// Estados da sequência de desvio de obstáculo
+enum AvoidState : uint8_t {
+  AVOID_NONE = 0,      // não desviando
+  AVOID_LEFT,          // sair da linha girando para a esquerda
+  AVOID_FORWARD,       // andar reto afastado do obstáculo
+  AVOID_RIGHT,         // virar à direita para voltar em direção à linha
+  AVOID_RETURN         // seguir reto tentando reencontrar a linha
+};
+
+bool inAvoidMode = false;
+AvoidState avoidState = AVOID_NONE;
+unsigned long avoidStartMs = 0;   // início de todo o desvio
+unsigned long avoidStateStartMs = 0; // início do estado atual de desvio
+
+// Tempos (em ms) de cada fase do desvio - ajuste conforme o robô
+const unsigned long AVOID_LEFT_MS    = 400;  // quanto tempo gira para a esquerda saindo da linha
+const unsigned long AVOID_FORWARD_MS = 1200;  // quanto tempo anda reto longe do obstáculo
+const unsigned long AVOID_RIGHT_MS   = 450;  // quanto tempo gira para a direita voltando na direção da linha
+const unsigned long AVOID_TOTAL_TIMEOUT_MS = 6000; // tempo máximo total tentando desviar
 
 void setup() {
   // Sensores analógicos: apenas INPUT (sem pull-up)
@@ -194,10 +214,14 @@ void loop() {
     lastLedMs = now;
   }
 
-  if (now - lastUSms >= 60) { // ~16 Hz
-    distCm = measureDistanceCm();
+  // Mede distância ~25 vezes por segundo. Filtra leituras 0 para não "perder" o obstáculo quando está muito perto.
+  if (now - lastUSms >= 40) { // ~25 Hz
+    unsigned int d = measureDistanceCm();
     lastUSms = now;
-    // print removido para consolidar em uma única linha de debug
+    // Só atualiza se houve eco válido (> 0). Leituras 0 acontecem quando o objeto está muito perto ou não há eco.
+    if (d > 0) {
+      distCm = d;
+    }
   }
 
   // Histerese simples para estado de obstáculo
@@ -209,27 +233,97 @@ void loop() {
 
   Mode mode;
 
-  // Se houver obstáculo à frente, para o robô
-  if (obstacle) {
+  // ---------------- Lógica de desvio de obstáculo ----------------
+  // Entrada no modo de desvio: borda de subida de "obstacle"
+  static bool prevObstacle = false;
+  if (obstacle && !prevObstacle && !inAvoidMode) {
+    // Começa a sequência de desvio: sair pela esquerda
+    inAvoidMode = true;
+    avoidState = AVOID_LEFT;
+    avoidStartMs = now;
+    avoidStateStartMs = now;
+  }
+
+  // Se tempo total de desvio estourar, aborta e para o robô
+  if (inAvoidMode && (now - avoidStartMs >= AVOID_TOTAL_TIMEOUT_MS)) {
+    inAvoidMode = false;
+    avoidState = AVOID_NONE;
     mode = MODE_IDLE;
+  }
+
+  if (inAvoidMode) {
+    // Sequência de desvio (ignora seguidor de linha normal enquanto estiver aqui)
+    switch (avoidState) {
+      case AVOID_LEFT:
+        // Gira para a esquerda para sair da linha
+        mode = MODE_LEFT;
+        if (now - avoidStateStartMs >= AVOID_LEFT_MS) {
+          avoidState = AVOID_FORWARD;
+          avoidStateStartMs = now;
+        }
+        break;
+
+      case AVOID_FORWARD:
+        // Anda reto um pouco para passar o obstáculo
+        mode = MODE_STRAIGHT;
+        if (now - avoidStateStartMs >= AVOID_FORWARD_MS) {
+          avoidState = AVOID_RIGHT;
+          avoidStateStartMs = now;
+        }
+        break;
+
+      case AVOID_RIGHT:
+        // Gira para a direita para voltar em direção à linha
+        mode = MODE_RIGHT;
+        if (now - avoidStateStartMs >= AVOID_RIGHT_MS) {
+          avoidState = AVOID_RETURN;
+          avoidStateStartMs = now;
+        }
+        break;
+
+      case AVOID_RETURN:
+        // Anda reto tentando reencontrar a linha
+        mode = MODE_STRAIGHT;
+        // Se o centro enxergar a linha novamente, sai do modo de desvio
+        if (C) {
+          inAvoidMode = false;
+          avoidState = AVOID_NONE;
+        }
+        break;
+
+      default:
+        // Qualquer outro caso, sai do modo de desvio por segurança
+        inAvoidMode = false;
+        avoidState = AVOID_NONE;
+        mode = MODE_STRAIGHT;
+        break;
+    }
   } else {
-    // Prioridade: se centro vê linha, siga reto; senão ajuste para o lado que vê.
-    if (C) {
-      mode = MODE_STRAIGHT;
-    } else if (L && !R) {
-      // inverter direções: sensor ESQUERDO agora força correção que antes era associada a MODE_RIGHT
-      mode = MODE_RIGHT;
-    } else if (R && !L) {
-      // inverter direções: sensor DIREITO agora força correção que antes era associada a MODE_LEFT
-      mode = MODE_LEFT;
-    } else if (L && R) {
-      // Linha larga / cruzamento: tente seguir reto
-      mode = MODE_STRAIGHT;
+    // ---------------- Seguidor de linha normal ----------------
+    if (obstacle) {
+      // Se ainda há obstáculo mas não estamos em desvio, por segurança para o robô
+      mode = MODE_IDLE;
     } else {
-      // Nada detectado: seguir reto (pedido do usuário)
-      mode = MODE_STRAIGHT;
+      // Prioridade: se centro vê linha, siga reto; senão ajuste para o lado que vê.
+      if (C) {
+        mode = MODE_STRAIGHT;
+      } else if (L && !R) {
+        // inverter direções: sensor ESQUERDO agora força correção que antes era associada a MODE_RIGHT
+        mode = MODE_RIGHT;
+      } else if (R && !L) {
+        // inverter direções: sensor DIREITO agora força correção que antes era associada a MODE_LEFT
+        mode = MODE_LEFT;
+      } else if (L && R) {
+        // Linha larga / cruzamento: tente seguir reto
+        mode = MODE_STRAIGHT;
+      } else {
+        // Nada detectado: seguir reto (pedido do usuário)
+        mode = MODE_STRAIGHT;
+      }
     }
   }
+
+  prevObstacle = obstacle;
 
 #if DEBUG
   static uint32_t t0 = 0;
